@@ -1,5 +1,3 @@
-#!node
-
 const net = require("net");
 const app = require("express")();
 const sql = require("mssql");
@@ -9,80 +7,59 @@ const fs = require("fs");
 const moment = require("moment");
 const _ = require("lodash");
 const bodyParser = require("body-parser");
-// let clr = null;
-// let start = null;
-// let stop = null;
-const sqlite3 = require('sqlite3').verbose();
 
-let db = new sqlite3.Database('./db/machine.db', sqlite3.OPEN_READWRITE, (err) => {
-    if (err) {
-        return console.error(err.message);
-    }
-    console.log('Connected to the database.');
-});
-
-let sqlcmd = `SELECT * FROM numlist;`;
-db.all(sqlcmd, [], (err, rows) => {
-    if (err) {
-        throw err;
-    }
-    rows.forEach((row) => {
-        console.log(row.mac);
-    });
-});
-
-
-cron_add = (m) => { //add machine to cron 
-    let sqlcmd = "INSERT INTO numlist ( mac )  VALUES ( '" + m + "');";
-    db.all(sqlcmd, [], (err, rows) => {
-        if (err) {
-            throw err;
-        }
-        // rows.forEach((row) => {
-        //   console.log(row.mac);
-        //});
-    });
-}
-
-cron_remove = (m) => { //remove machine from cron
-    let sqlcmd = "DELETE FROM numlist WHERE mac = " + m + ";";
-    db.all(sqlcmd, [], (err, rows) => {
-        if (err) {
-            throw err;
-        }
-        // rows.forEach((row) => {
-        //   console.log(row.mac);
-        //});
-    });
-}
-
-
-// const { PORT_SERVER, TIMEOUT, PORT_MA, ip, cmdt, cmde, mcode, infom } = require("./config");
-const { PORT_SERVER, TIMEOUT, PORT_MA, cmdt, cmde, infom } = require("./config");
+const { PORT_SERVER, TIMEOUT, infom, configdb } = require("./config");
 
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-const configdb = {
-    user: "mi",
-    password: "miadmin",
-    server: "192.168.5.19",
-    // server: "192.168.5.20",
-    database: "mi",
-    options: {
-        enableArithAbort: true,
-    },
-};
+add_machine = (m) => { //add machine to cron 
+	sql.connect(configdb)
+	.then((pool) => {
+		return pool
+			.request()
+			.query(`INSERT INTO machine_counter_running (machine_id)  VALUES ('${m}')`);
+	})
+	.then((result) => {
+		return result;
+	})
+	.then(() => {
+		pool.close()
+	})
+	.catch((err) => {
+		return err;
+	});
+}
+
+remove_machine = (m) => { //remove machine from cron
+    sql.connect(configdb)
+	.then((pool) => {
+		return pool
+			.request()
+			.query(`DELETE FROM machine_counter_running WHERE machine_id='${m}'`);
+	})
+	.then((result) => {
+		return result;
+	})
+	.then(() => {
+		pool.close()
+	})
+	.catch((err) => {
+		return err;
+	});
+}
+
+getMachineData = (m) => {
+	let n = _.find(infom, (o) => { return o.m == m; });
+	return n;
+}
 
 wlog = (w) => {
     const dd = new moment().format("YYYY-MM-DD");
     const path_log = "/logs/" + dd + ".log";
     const t = new moment().format("YYYY-MM-DD H:mm:ss");
-    fs.appendFile(path.join(__dirname + path_log), w + " " + t + "\n", function(
-        err
-    ) {
+    fs.appendFile(path.join(__dirname + path_log), w + " " + t + "\n", function(err) {
         if (err) return console.log(err);
-        console.log("log => " + w);
     });
 };
 
@@ -92,76 +69,115 @@ pad = (n, width, z) => {
     return n.length >= width ? n : new Array(width - n.length + 1).join(z) + n;
 }
 
-
-//machine ,amount, remark (start, stop, stoperror)
-Save2Db = (machine, c_num, rem) => {
+Save2Db = (postData) => {
+	const { machine_id, counter_count, remark, type, header_id=0 } = postData
     sql.on("error", (err) => {
         return err;
     });
-    sql
-        .connect(configdb)
-        .then((pool) => {
-            return pool
-                .request()
-                .query("INSERT INTO [dbo].[machine_counter] ([machine_id],[counter_count],[remark]) VALUES ('" + machine + "'," + c_num + ",'" + rem + "')");
-        })
-        .then((result) => {
-            return result;
-        })
-        .catch((err) => {
-            return err;
-        });
+    sql.connect(configdb)
+	.then((pool) => {
+		return pool
+			.request()
+			.query(`INSERT INTO machine_counter (machine_id,counter_count,remark,status,type,header_id) VALUES ('${machine_id}','${counter_count}','${remark}','1','${type}','${header_id}')`);
+	})
+	.then((result) => {
+		return result;
+	})
+	.then(() => {
+		pool.close()
+	})
+	.catch((err) => {
+		return err;
+	});
 };
 
+task_schedule = (m) => {
+    let n = getMachineData(m)
+	try {
+		const client = new net.Socket();
+		client.connect(n.cport, n.i, () => {
+			let c = "RD DM" + n.ch + ".D\r"
+			client.write(c,()=>{
+				let command_clear = "WR MR" + n.clr + " 1\r"
+				client.write(command_clear);
+			});
+		});
+		client.on("data", (data) => {
+			let counter_count = parseInt(data);
+			const postData = {
+				machine_id: n.m, 
+				counter_count: counter_count,
+				remark: 'บันทึกอัตโนมัติ', 
+				type: 'cronjob',
+				header_id:0
+			}
+			Save2Db(postData);
+			client.destroy();
+		});
 
-inlist = (m) => { //list all in current cron 
-    let n = _.find(infom, (o) => { return o.m == m; });
-    console.log(n);
-    const client = new net.Socket();
-    // let c = new Buffer.from([0x52,0x44,0x20,0x44,0x4d,0x33,0x30,0x2e,0x44,0x0d,0x0a]);
-    // let c = "RD DM30.D\r";
-    // let p = pad(n.ch, 2)
-    let c = "RD DM3" + n.ch + ".D\r"
-    client.connect(n.cport, n.i, () => {
-        console.log("Connected");
-        client.write(c);
-    });
-    client.on("data", (data) => {
-        let x = parseInt(data);
-        console.log(x);
-        Save2Db(n.m, x, '');
-        client.destroy();
-    });
-
-    client.setTimeout(TIMEOUT);
-    client.on("timeout", () => {
-        console.log("socket timeout");
-        client.destroy();
-    });
-    client.on("close", (data) => {
-        console.log("Closed");
-    });
-
+		client.setTimeout(TIMEOUT);
+		client.on("timeout", () => {
+			console.log("on timeout");
+			client.destroy();
+		});
+	} catch (error) {
+		console.log(error);
+	}
 }
 
-
+app.get("/test",(req, res)=>{
+	 try {
+            sql.connect(configdb)
+			.then((pool) => {
+				return pool
+					.request()
+					.query(`SELECT machine_id FROM machine_counter_running`);
+			})
+			.then((data) => {
+				if(data.recordset){
+					data.recordset.map((item, index)=>{
+						//console.log(item.machine_id)
+						task_schedule(item.machine_id)
+					})
+				}
+				res.end('end')
+			})
+			.then(() => {
+				pool.close()
+			})
+			.catch((err) => {
+				return err;
+			});
+			
+        } catch (error) {
+            console.log(error);
+        }
+})
 
 //*/30 * * * *  (every 30 min)
 //0 * * * *  (every 1 hour)
 const job30min = new CronJob("*/30 * * * *", () => {
-        console.log("save from cron " + Date());
         wlog("save from cron " + Date());
         try {
-            let sqlcmd = `SELECT * FROM numlist;`;
-            db.all(sqlcmd, [], (err, rows) => {
-                if (err) {
-                    throw err;
-                }
-                rows.forEach((row) => {
-                    console.log(row.mac);
-                    inlist(row.mac)
-                });
-            });
+            sql.connect(configdb)
+			.then((pool) => {
+				return pool
+					.request()
+					.query(`SELECT machine_id FROM machine_counter_running`);
+			})
+			.then((data) => {
+				if(data.recordset){
+					data.recordset.map((item, index)=>{
+						//console.log(item.machine_id)
+						task_schedule(item.machine_id)
+					})
+				}
+				res.end('end')
+			})
+			.catch((err) => {
+				return err;
+			});
+			
         } catch (error) {
             console.log(error);
         }
@@ -181,114 +197,136 @@ tst = () => {
     return tst;
 };
 
-app.get("/info", (req, res) => {
-    let g = _.find(infom, (o) => { return o.m == 3403; });
-    console.log(g)
-    console.log("/");
-    res.sendFile(path.join(__dirname + "/html/index.html"));
-});
-
 app.get("/", (req, res) => {
     console.log("/");
     res.sendFile(path.join(__dirname + "/html/index.html"));
 });
-app.get("/favicon.ico", (req, res) => {
-    console.log("/fav.ico");
-    res.sendFile(path.join(__dirname + "/html/favicon.ico"));
-});
-app.get("/log/:id", (req, res) => {
-    const { id } = req.params;
-    console.log("/log/" + id);
 
-    let px = path.join(__dirname + "/logs/" + id + ".log");
-    // try {
-    if (fs.existsSync(px)) {
-        //file exists
-        res.sendFile(px);
+app.get("/start/:m", (req, res) => {
+	const { m } = req.params
+   let n = getMachineData(m)
+   console.log(n);
+    if (typeof n !== "undefined") {
+		wlog("/start_cmd/" + n.m);
+		remove_machine(n.m)
+		add_machine(n.m);
+        try {
+			const client = new net.Socket();
+            client.connect(n.cport, n.i, () => {
+				let command_start = "WR MR" + n.start + " 1\r";
+				client.write(command_start);
+            });
+			client.on('data',function(data){
+				console.log('on read')
+				const postData = {
+					machine_id: n.m, 
+					counter_count: 0,
+					remark: 'R_วิ่งเครื่อง', 
+					type: 'start',
+					header_id:0
+				}
+                Save2Db(postData);
+                res.json(postData);
+				client.destroy();
+			});
+			
+			client.setTimeout(TIMEOUT);
+			client.on("timeout", () => {
+				console.log("on timeout");
+				client.destroy();
+			});
+			
+        } catch (error) {
+            console.log('on error'+error);
+			res.json({success: false, message: error});
+			client.destroy();
+        }
+		
     } else {
-        // } catch (err) {
-        console.error(err);
-        res.json({ data: 0, code: "500", message: "read error", timestamp: tst() });
+		client.destroy();
+		res.json({success: false, message: "machine start not found"});
     }
-
 });
 
 
-app.get("/list", (req, res) => {
-    console.log("/list");
-    wlog("/list");
-    sql.on("error", (err) => {
-        res.json(err);
-    });
-    sql
-        .connect(configdb)
-        .then((pool) => {
-            return pool
-                .request()
-                .query(
-                    "SELECT TOP (20) [counter_id],[machine_id],[counter_count],[created] FROM [mi].[dbo].[machine_counter] ORDER BY created DESC"
-                );
-        })
-        .then((result) => {
-            res.send(result.recordset);
-        })
-        .catch((err) => {
-            res.json(err);
-        });
+app.get("/stop/:m/:remark", (req, res) => {
+	 let { m, remark } = req.params;
+    let n = getMachineData(m)
+    if (typeof n !== "undefined") {
+		wlog("/stop_savedb/" + n.m);
+       remove_machine(n.m)
+        try {
+			const client = new net.Socket();
+            client.connect(n.cport, n.i, () => {
+				let c = "RD DM" + n.ch + ".D\r";
+                client.write(c,()=>{
+					let command_stop = "WR MR" + n.stop + " 1\r";
+					 client.write(command_stop)
+				});
+            });
+            client.on("data", (data) => {
+                let counter_count = parseInt(data);
+				const postData = {
+					machine_id: n.m, 
+					counter_count: counter_count,
+					remark: remark, 
+					type: 'stop',
+					header_id:0
+				}
+                Save2Db(postData);
+				
+				res.json(postData);
+                client.destroy();
+            });
+			
+			client.setTimeout(TIMEOUT);
+			client.on("timeout", () => {
+				console.log("on timeout");
+				client.destroy();
+			});
+
+        } catch (error) {
+            client.destroy();
+        }
+		
+	}
+
 });
 
 app.get("/current/:m", (req, res) => { //OK
     let { m } = req.params;
-    let n = _.find(infom, (o) => { return o.m == m; });
-    console.log(n);
+    let n = getMachineData(m)
     if (typeof n !== "undefined") { //display not found when id not found
-        console.log("/current/" + n.m);
         wlog("/current/" + n.m);
-        if (Number(n.m)) {
-            try {
-                const client = new net.Socket();
-                // let c = "RDS DM30.D 16\r";  //old
-                let c = "RD DM" + n + "WR MR" + start + ".D\r"; //new
-                client.connect(n.cport, n.i, () => {
-                    console.log("Connected : " + c);
-                    client.write(c);
-                });
-                client.setTimeout(TIMEOUT);
-                client.on("timeout", () => {
-                    console.log("socket timeout");
-                    client.destroy();
-                    res.json({
-                        data: 0,
-                        code: "500",
-                        message: "socket timeout",
-                        timestamp: tst(),
-                    });
-                });
-                client.on("data", (data) => {
-                    let x = parseInt(data);
-                    // let w = data.toString().split(" ");
-                    // console.log("DATA : " + parseInt(w[n.ch]));
-                    console.log("DATA : " + x);
-                    client.destroy();
-                    res.json({
-                        // data: parseInt(w[n.ch]),
-                        data: x,
-                        status: "200",
-                        message: "success",
-                        timestamp: tst(),
-                    });
-                });
-                client.on("close", (data) => {
-                    console.log("Closed");
-                });
-            } catch (error) {
-                console.log(error);
-                res.json({ data: 0, code: "500", message: error, timestamp: tst() });
-            }
-
-        } else {
-            res.json({ data: 0, code: "500", message: error, timestamp: tst() });
-        }
+		try {
+			const client = new net.Socket();
+			client.connect(n.cport, n.i, () => {
+				let c = "RD DM" + n.ch + ".D\r";
+				client.write(c);
+			});
+		   
+			client.on("data", (data) => {
+				let counter_count = parseInt(data);
+				const postData = {
+					machine_id: n.m, 
+					counter_count: counter_count,
+					remark: 'get current', 
+					type: 'current',
+					header_id:0
+				}
+				res.json(postData);
+				client.destroy();
+			});
+			
+			client.setTimeout(TIMEOUT);
+			client.on("timeout", () => {
+				console.log("on timeout");
+				client.destroy();
+			});
+		} catch (error) {
+			console.log(error);
+			res.json({ data: 0, code: "500", message: error, timestamp: tst() });
+		}
 
     } else { //validate when id not found
         console.log("not found");
@@ -299,54 +337,27 @@ app.get("/current/:m", (req, res) => { //OK
 
 app.get("/status/:m", (req, res) => {
     let { m } = req.params;
-    let n = _.find(infom, (o) => { return o.m == m; });
-    console.log(n);
+    let n =  getMachineData(m)
     if (typeof n !== "undefined") { //display not found when id not found
-        console.log("/status/" + n.m);
         wlog("/status/" + n.m);
         try {
             const client = new net.Socket();
-            // let c = new Buffer.from([0x52,0x44,0x20,0x4d,0x52,0x30,0x30,0x31,0x0d,0x0a]);
-            // let c = "RD MR001\r";
-            let c = "RD MR" + n.ch + "1\r";
             client.connect(n.cport, n.i, () => {
-                console.log("Connected : " + c);
+				let c = "RD MR" + n.sts + "\r";
                 client.write(c);
             });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
             client.on("data", (data) => {
-                let x = parseInt(data);
-                console.log(x);
-                client.destroy();
-                if (x == 1) {
-                    res.json({
-                        data: x,
-                        status: "200",
-                        message: "active is running",
-                        timestamp: tst(),
-                    });
-                } else {
-                    res.json({
-                        data: x,
-                        status: "200",
-                        message: "inactive not running",
-                        timestamp: tst(),
-                    });
-                }
+				let x = parseInt(data);
+				//const json = JSON.stringify(data);
+				res.json(data)
+				client.destroy();
             });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
+			
+			client.setTimeout(TIMEOUT);
+			client.on("timeout", () => {
+				console.log("on timeout");
+				client.destroy();
+			});
         } catch (error) {
             console.log(error);
             res.json({ data: 0, code: "500", message: error });
@@ -357,382 +368,6 @@ app.get("/status/:m", (req, res) => {
         res.json({ data: 0, code: "500", message: m + " not found", timestamp: tst() });
     }
 
-});
-
-app.get("/stop/:m", (req, res) => {
-    //API STOP
-    // job30min.stop();
-    let { m } = req.params;
-    let n = _.find(infom, (o) => { return o.m == m; });
-    console.log(n);
-    if (typeof n !== "undefined") { //display not found when id not found
-        console.log("/stop_savedb/" + n.m);
-        wlog("/stop_savedb/" + n.m);
-        cron_remove(n.m)
-            //===========stop==========
-        try {
-            const client = new net.Socket();
-            // let c = new Buffer.from([0x52,0x44,0x20,0x44,0x4d,0x33,0x30,0x2e,0x44,0x0d,0x0a]);
-            let c = "RD DM3" + n.clr + ".D\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected");
-                client.write(c);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-            });
-            client.on("data", (data) => {
-                let x = parseInt(data);
-                console.log(x);
-                Save2Db(g, x, 'stop'); //<===== save to db 
-                res.json({ machine_id: g, counter_count: x, remark: "stop" });
-                client.destroy();
-                console.log("save2db success");
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-        }
-        //======================
-        try {
-            console.log("/stop_cmd/" + g);
-            wlog("/stop_cmd/" + g);
-            const client = new net.Socket();
-            // let c = new Buffer.from([0x57,0x52,0x20,0x4d,0x52,0x30,0x30,0x32,0x20,0x31,0x0d,0x0a]);
-            let c = "WR MR" + n.clr + "2 1\r"; //<==== stop
-            client.connect(n.cport, n.i, (data) => {
-                console.log("Connected");
-                client.write(c);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
-            client.on("data", (data) => {
-                let sto = data.toString();
-                console.log(sto);
-                client.destroy();
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-            res.json({ data: 0, code: "500", message: error });
-        }
-
-    } else {
-        res.json({ data: 0, code: "403", message: "machine stop not found" });
-    }
-
-});
-
-
-//==========start=stoperror=============
-app.get("/stoperror/:m", (req, res) => {
-    //API STOP
-    // job30min.stop();
-    let { m } = req.params;
-    let n = _.find(infom, (o) => { return o.m == m; });
-    console.log(n);
-    if (typeof n !== "undefined") { //display not found when id not found
-        console.log("/status/" + n.m);
-        wlog("/status/" + n.m);
-        //===========saveDB==========
-        try {
-            const client = new net.Socket();
-            // let c = new Buffer.from([0x52,0x44,0x20,0x44,0x4d,0x33,0x30,0x2e,0x44,0x0d,0x0a]);
-            // let c = "RD DM30.D\r";
-            let c = "RD DM3" + n.ch + ".D\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected");
-                client.write(c);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-            });
-            client.on("data", (data) => {
-                let x = parseInt(data);
-                console.log(x);
-                Save2Db(g, x, 'stoperror');
-                // res.json({ machine_id : g, counter_count: x, remark: "stoperror" });
-                client.destroy();
-                console.log("save2db stoperror success");
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-        }
-        //==========cmd stop pause===========
-        try {
-            console.log("/stoperror/" + g);
-            const client = new net.Socket();
-            // let c = new Buffer.from([0x57,0x52,0x20,0x4d,0x52,0x30,0x30,0x32,0x20,0x31,0x0d,0x0a]);
-            // let c = "WR MR002 1\r";
-            let c = "WR MR" + n.clr + "2 1\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected => " + c);
-                client.write(c);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
-            client.on("data", (data) => {
-                let sto = data.toString();
-                console.log(sto);
-                client.destroy();
-                res.json({ data: 0, status: "200", message: "clear on stoperror success" });
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-            res.json({ data: 0, code: "500", message: error });
-        }
-
-        //=========clear count=============
-
-        try {
-            const client = new net.Socket();
-            // let cmd = new Buffer.from([0x57, 0x52, 0x20, 0x4d, 0x52, 0x30, 0x30, 0x34, 0x20, 0x31, 0x0d, 0x0a]);
-            // let cmd = "WR MR004 1\r";
-            let c = "WR MR" + n.clr + "4 1\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected => " + cmd);
-                client.write(cmd);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
-            client.on("data", (data) => {
-                let x = 0;
-                console.log("stoperror clearx => " + data.toString("utf8")); // OK msg
-                client.destroy();
-            });
-            client.on("close", (data) => {
-                console.log("stoperror Closed");
-            });
-        } catch (error) {
-            console.log(error);
-            res.json({ data: 0, code: "500", message: error });
-        }
-
-        //=========end clear count=============
-
-    } else {
-        res.json({ data: 0, code: "403", message: "machine stop error not found" });
-    }
-
-});
-//==========end=stoperror=============
-
-
-app.get("/start/:m", (req, res) => {
-    //API START
-    // job30min.start();
-    let { m } = req.params;
-    let n = _.find(infom, (o) => { return o.m == m; });
-    console.log(n);
-    if (typeof n !== "undefined") { //display not found when id not found
-        console.log("/start_cmd/" + n.m);
-        wlog("/start_cmd/" + n.m);
-        cron_add(n.m);
-        try {
-            const client = new net.Socket();
-            //WR MR000 1  /START
-            let c = "WR MR" + n.start + " 1\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected");
-                client.write(c);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
-            client.on("data", (data) => {
-                let sta = data.toString();
-                console.log(sta);
-                client.destroy();
-                Save2Db(n.m, 0, 'start');
-                res.json({ machine_id: n.m, counter_count: 0, remark: "start" });
-
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-            res.json({ data: 0, code: "500", message: error });
-        }
-    } else {
-        res.json({ data: 0, code: "403", message: "machine start not found" });
-    }
-});
-
-
-app.get("/clear/:m", (req, res) => {
-    //API CLEAR
-    let { m } = req.params;
-    let n = _.find(infom, (o) => { return o.m == m; });
-    console.log(n);
-    if (typeof n !== "undefined") { //display not found when id not found
-        console.log("/clear_savedb/" + n.m);
-        wlog("/clear_savedb/" + n.m);
-        //===========get save2db===========
-        try {
-            const client = new net.Socket();
-            let c = "RD DM3" + n.ch + ".D\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected");
-                client.write(c);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                // client.end();
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
-            client.on("data", (data) => {
-                let x = parseInt(data);
-                console.log(x);
-                Save2Db(n.m, x, 'clear');
-                client.destroy();
-                res.json({
-                    data: x,
-                    status: "200",
-                    message: "clear success",
-                    timestamp: tst(),
-                });
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-            res.json({ data: 0, code: "500", message: error, timestamp: tst() });
-        }
-
-
-        //==========cmd stop===========
-        try {
-            console.log("/stop_cmd/" + n.m);
-            wlog("/stop_cmd/" + n.m);
-            const client = new net.Socket();
-            // let c = new Buffer.from([0x57,0x52,0x20,0x4d,0x52,0x30,0x30,0x32,0x20,0x31,0x0d,0x0a]);
-            // let c = "WR MR002 1\r";
-            let c = "WR MR" + n.ch + "2 1\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected => " + c);
-                client.write(c);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
-            client.on("data", (data) => {
-                let sto = data.toString();
-                console.log(sto);
-                client.destroy();
-                //res.json({ data: 0, status: "200", message: "clear on stoperror success" });
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-            res.json({ data: 0, code: "500", message: error });
-        }
-
-
-        //=========clear count=============
-        try {
-            console.log("/clear_cmd/" + n.m);
-            wlog("/clear_cmd/" + n.m);
-            const client = new net.Socket();
-            let c = "WR MR" + n.ch + "4 1\r";
-            client.connect(n.cport, n.i, () => {
-                console.log("Connected");
-                client.write(cmd);
-            });
-            client.setTimeout(TIMEOUT);
-            client.on("timeout", () => {
-                console.log("socket timeout");
-                client.destroy();
-                res.json({
-                    data: 0,
-                    code: "500",
-                    message: "socket timeout",
-                    timestamp: tst(),
-                });
-            });
-            client.on("data", (data) => {
-                let x = 0;
-                console.log(data.toString("utf8"));
-                x = parseInt(data).toString();
-                client.destroy();
-                res.json({ data: 0, status: "200", message: "clear success" });
-            });
-            client.on("close", (data) => {
-                console.log("Closed");
-            });
-        } catch (error) {
-            console.log(error);
-            res.json({ data: 0, code: "500", message: error });
-        }
-        //=========end clear count=============
-    }
 });
 
 
